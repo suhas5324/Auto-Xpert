@@ -3,12 +3,15 @@ from __future__ import annotations
 import io
 import logging
 import os
+import shutil
+import threading
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from math import asin, cos, radians, sin, sqrt
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 import requests
 import timm
@@ -17,13 +20,40 @@ import torchvision.transforms as transforms
 import uvicorn
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from huggingface_hub import hf_hub_download
 from PIL import Image, UnidentifiedImageError
 from ultralytics import YOLO
 
+BASE_DIR = Path(__file__).resolve().parent
+
+
+def load_local_env(env_path: Path) -> None:
+    if not env_path.exists():
+        return
+
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if key.startswith("export "):
+            key = key.removeprefix("export ").strip()
+
+        if not key or key in os.environ:
+            continue
+
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+
+        os.environ[key] = value
+
+
+load_local_env(BASE_DIR / ".env")
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper())
 LOGGER = logging.getLogger("car_damage_backend")
-
-BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_OVERPASS_ENDPOINTS = (
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
@@ -59,6 +89,13 @@ class ModelBundle:
     transform: transforms.Compose
 
 
+@dataclass(frozen=True)
+class HuggingFaceModelRef:
+    repo_id: str
+    revision: str
+    filename: str
+
+
 def parse_csv_env(raw_value: str | None, default_values: tuple[str, ...] | list[str]) -> list[str]:
     if not raw_value:
         return list(default_values)
@@ -75,6 +112,28 @@ def resolve_path(raw_value: str | None, default_relative_path: str) -> Path:
         return candidate.resolve()
 
     return (BASE_DIR / default_relative_path).resolve()
+
+
+def parse_huggingface_model_url(download_url: str) -> HuggingFaceModelRef | None:
+    parsed_url = urlparse(download_url)
+    if parsed_url.scheme not in {"http", "https"} or parsed_url.netloc != "huggingface.co":
+        return None
+
+    path_parts = [unquote(part) for part in parsed_url.path.strip("/").split("/") if part]
+    if len(path_parts) < 5 or path_parts[2] not in {"resolve", "blob"}:
+        return None
+
+    repo_id = "/".join(path_parts[:2])
+    revision = path_parts[3]
+    filename = "/".join(path_parts[4:])
+    if not repo_id or not revision or not filename:
+        return None
+
+    return HuggingFaceModelRef(
+        repo_id=repo_id,
+        revision=revision,
+        filename=filename,
+    )
 
 
 def load_settings() -> Settings:
@@ -105,8 +164,44 @@ def load_settings() -> Settings:
 SETTINGS = load_settings()
 
 
-def ensure_model_file(model_path: Path, download_url: str | None, timeout_seconds: int) -> None:
-    if model_path.exists():
+def download_model_file(
+    download_url: str,
+    destination_path: Path,
+    timeout_seconds: int,
+    *,
+    force_download: bool,
+) -> None:
+    huggingface_ref = parse_huggingface_model_url(download_url)
+    if huggingface_ref is not None:
+        hub_token = os.getenv("HUGGINGFACE_HUB_TOKEN") or os.getenv("HF_TOKEN")
+        cached_path = Path(
+            hf_hub_download(
+                repo_id=huggingface_ref.repo_id,
+                filename=huggingface_ref.filename,
+                revision=huggingface_ref.revision,
+                force_download=force_download,
+                token=hub_token,
+            )
+        )
+        shutil.copy2(cached_path, destination_path)
+        return
+
+    with requests.get(download_url, stream=True, timeout=max(timeout_seconds, 120)) as response:
+        response.raise_for_status()
+        with destination_path.open("wb") as output_file:
+            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    output_file.write(chunk)
+
+
+def ensure_model_file(
+    model_path: Path,
+    download_url: str | None,
+    timeout_seconds: int,
+    *,
+    force_download: bool = False,
+) -> None:
+    if model_path.exists() and not force_download:
         return
 
     if not download_url:
@@ -115,19 +210,57 @@ def ensure_model_file(model_path: Path, download_url: str | None, timeout_second
             "Set the matching *_MODEL_PATH or *_MODEL_URL environment variable."
         )
 
-    LOGGER.info("Downloading model to %s", model_path)
+    LOGGER.info("%s model to %s", "Re-downloading" if force_download else "Downloading", model_path)
     model_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = model_path.with_suffix(f"{model_path.suffix}.part")
 
-    with requests.get(download_url, stream=True, timeout=max(timeout_seconds, 120)) as response:
-        response.raise_for_status()
-        with model_path.open("wb") as output_file:
-            for chunk in response.iter_content(chunk_size=1024 * 1024):
-                if chunk:
-                    output_file.write(chunk)
+    if temp_path.exists():
+        temp_path.unlink()
+
+    try:
+        download_model_file(
+            download_url,
+            temp_path,
+            timeout_seconds,
+            force_download=force_download,
+        )
+        temp_path.replace(model_path)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
 
 
-def load_state_dict(model_path: Path, device: str) -> dict[str, Any]:
-    checkpoint = torch.load(model_path, map_location=device)
+def load_state_dict(
+    model_path: Path,
+    device: str,
+    download_url: str | None,
+    timeout_seconds: int,
+    *,
+    allow_refresh: bool = True,
+) -> dict[str, Any]:
+    try:
+        checkpoint = torch.load(model_path, map_location=device)
+    except RuntimeError as exc:
+        if allow_refresh and download_url:
+            LOGGER.warning("Checkpoint at %s looks invalid. Attempting to refresh it.", model_path)
+            ensure_model_file(
+                model_path,
+                download_url,
+                timeout_seconds,
+                force_download=True,
+            )
+            return load_state_dict(
+                model_path,
+                device,
+                download_url,
+                timeout_seconds,
+                allow_refresh=False,
+            )
+
+        raise RuntimeError(
+            f"Invalid checkpoint file: {model_path}. Replace it with a valid model file or set the "
+            "matching *_MODEL_URL so it can be downloaded again."
+        ) from exc
 
     if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
         checkpoint = checkpoint["state_dict"]
@@ -176,7 +309,14 @@ def build_model_bundle(settings: Settings) -> ModelBundle:
         pretrained=False,
         num_classes=len(SEVERITY_CLASSES),
     )
-    severity_model.load_state_dict(load_state_dict(settings.severity_model_path, settings.device))
+    severity_model.load_state_dict(
+        load_state_dict(
+            settings.severity_model_path,
+            settings.device,
+            settings.severity_model_url,
+            settings.request_timeout_seconds,
+        )
+    )
     severity_model.to(settings.device)
     severity_model.eval()
 
@@ -186,7 +326,14 @@ def build_model_bundle(settings: Settings) -> ModelBundle:
         pretrained=False,
         num_classes=len(TYPE_CLASSES),
     )
-    type_model.load_state_dict(load_state_dict(settings.type_model_path, settings.device))
+    type_model.load_state_dict(
+        load_state_dict(
+            settings.type_model_path,
+            settings.device,
+            settings.type_model_url,
+            settings.request_timeout_seconds,
+        )
+    )
     type_model.to(settings.device)
     type_model.eval()
 
@@ -198,11 +345,53 @@ def build_model_bundle(settings: Settings) -> ModelBundle:
     )
 
 
+def ensure_app_state(app: FastAPI) -> None:
+    if not hasattr(app.state, "settings"):
+        app.state.settings = SETTINGS
+    if not hasattr(app.state, "models"):
+        app.state.models = None
+    if not hasattr(app.state, "model_error"):
+        app.state.model_error = None
+    if not hasattr(app.state, "model_lock"):
+        app.state.model_lock = threading.Lock()
+
+
+def initialize_models(app: FastAPI, *, log_failures: bool) -> ModelBundle | None:
+    ensure_app_state(app)
+    models = getattr(app.state, "models", None)
+    if models is not None:
+        return models
+
+    with app.state.model_lock:
+        models = getattr(app.state, "models", None)
+        if models is not None:
+            return models
+
+        settings = getattr(app.state, "settings", SETTINGS)
+
+        try:
+            models = build_model_bundle(settings)
+        except Exception as exc:
+            app.state.models = None
+            app.state.model_error = str(exc)
+            if log_failures:
+                LOGGER.exception("Model initialization failed")
+            return None
+
+        app.state.models = models
+        app.state.model_error = None
+        return models
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    app.state.settings = SETTINGS
-    app.state.models = build_model_bundle(SETTINGS)
-    LOGGER.info("Backend startup complete on device=%s", SETTINGS.device)
+    ensure_app_state(app)
+    initialize_models(app, log_failures=True)
+    LOGGER.info(
+        "Backend startup complete on device=%s models_loaded=%s",
+        SETTINGS.device,
+        app.state.models is not None,
+    )
     try:
         yield
     finally:
@@ -214,6 +403,7 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+ensure_app_state(app)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=SETTINGS.cors_allow_origins,
@@ -223,13 +413,19 @@ app.add_middleware(
 
 
 def get_settings(request: Request) -> Settings:
+    ensure_app_state(request.app)
     return request.app.state.settings
 
 
 def get_model_bundle(request: Request) -> ModelBundle:
-    models = getattr(request.app.state, "models", None)
+    models = initialize_models(request.app, log_failures=False)
     if models is None:
-        raise HTTPException(status_code=503, detail="Models are not ready yet.")
+        detail = getattr(
+            request.app.state,
+            "model_error",
+            "Models are not ready yet.",
+        )
+        raise HTTPException(status_code=503, detail=detail)
     return models
 
 
@@ -332,6 +528,7 @@ def health(request: Request) -> dict[str, Any]:
         "status": "ok",
         "device": settings.device,
         "models_loaded": getattr(request.app.state, "models", None) is not None,
+        "model_error": getattr(request.app.state, "model_error", None),
     }
 
 
@@ -350,6 +547,7 @@ async def predict(request: Request, file: UploadFile = File(...)) -> dict[str, A
         raise HTTPException(status_code=400, detail="Unable to read the uploaded image.") from exc
 
     models = get_model_bundle(request)
+    settings = get_settings(request)
     detection_result = models.yolo_model(image, verbose=False)[0]
 
     predictions = []
@@ -360,7 +558,7 @@ async def predict(request: Request, file: UploadFile = File(...)) -> dict[str, A
                 continue
 
             crop = image.crop((x1, y1, x2, y2))
-            crop_tensor = models.transform(crop).unsqueeze(0).to(SETTINGS.device)
+            crop_tensor = models.transform(crop).unsqueeze(0).to(settings.device)
 
             severity_index = int(models.severity_model(crop_tensor).argmax(dim=1).item())
             type_index = int(models.type_model(crop_tensor).argmax(dim=1).item())

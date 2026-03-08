@@ -1,0 +1,15 @@
+path: dataset   # points to your dataset folder
+train: images/train
+val: images/test
+# optional:
+# test: images/test
+
+names:
+  0: door
+  1: bumper
+  2: headlight
+  3: tire
+  4: license_plate
+  5: window
+  6: bonnet
+  7: roof

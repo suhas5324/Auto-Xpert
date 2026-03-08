@@ -1,0 +1,14 @@
+train: D:/COCO_dataset/dataset_parts/train/images
+val: D:/COCO_dataset/dataset_parts/val/images
+test: D:/COCO_dataset/dataset_parts/test/images
+
+nc: 7   # <-- number of car parts (update this)
+names:
+  - Door          # → class id 0
+  - Bumper        # → class id 1
+  - Bonnet        # → class id 2
+  - Glass         # → class id 3
+  - Tyre          # → class id 4
+  - Fender        # → class id 5
+  - Lamp          # → class id 6
+

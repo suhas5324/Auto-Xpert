@@ -1,0 +1,41 @@
+__pycache__/
+*.py[cod]
+*.log
+.env
+.env.*
+!.env.example
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Python virtual environments
+venv/
+.venv/
+env/
+ENV/
+backend/myenv/
+myenv/
+
+# Frontend build artifacts
+car_damage_frontend/node_modules/
+car_damage_frontend/dist/
+
+# Backend generated outputs
+backend/__pycache__/
+backend/runs/detect/predict/
+
+backend/convnextb_finetuned.pth
+backend/yolo11n.pt
+backend/yolov10n.pt
+backend/testr.py
+backend/types_efficientnet_b3.ipynb
+backend/mobilenetv3_large_100_type_best.ipynb
+backend/runs/detect/val*
+backend/runs/detect/train/
+
+

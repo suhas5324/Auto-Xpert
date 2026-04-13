@@ -2,7 +2,7 @@ services:
   - type: web
     name: car-damage-backend
     runtime: python
-    buildCommand: buildCommand: chmod +x build.sh && ./build.sh
+    buildCommand: chmod +x build.sh && ./build.sh
     startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
     envVars:

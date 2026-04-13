@@ -9,9 +9,9 @@ services:
       - key: PYTHON_VERSION
         value: "3.10.0"
       - key: SEVERITY_MODEL_URL
-        value: "https://huggingface.co/suhas-5324/car-damage-models/blob/main/convnextb_finetuned.pth"
+        value: "https://huggingface.co/suhas-5324/car-damage-models/resolve/main/convnextb_finetuned.pth"
       - key: TYPE_MODEL_URL
-        value: "https://huggingface.co/suhas-5324/car-damage-models/blob/main/mobilenetv3_large_100_type_best.pth"
+        value: "https://huggingface.co/suhas-5324/car-damage-models/resolve/main/mobilenetv3_large_100_type_best.pth"
       # - key: YOLO_MODEL_URL
       #   value: "https://huggingface.co/YOUR_USERNAME/YOUR_REPO/resolve/main/best.pt"
       - key: HF_TOKEN

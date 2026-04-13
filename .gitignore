@@ -37,5 +37,5 @@ backend/types_efficientnet_b3.ipynb
 backend/mobilenetv3_large_100_type_best.ipynb
 backend/runs/detect/val*
 backend/runs/detect/train/
-
-
+**.pth
+**/.env.example

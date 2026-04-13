@@ -7,4 +7,14 @@ services:
     healthCheckPath: /health
     envVars:
       - key: PYTHON_VERSION
-        value: 3.10.0
+        value: "3.10.0"
+      - key: SEVERITY_MODEL_URL
+        value: "https://huggingface.co/suhas-5324/car-damage-models/blob/main/convnextb_finetuned.pth"
+      - key: TYPE_MODEL_URL
+        value: "https://huggingface.co/suhas-5324/car-damage-models/blob/main/mobilenetv3_large_100_type_best.pth"
+      # - key: YOLO_MODEL_URL
+      #   value: "https://huggingface.co/YOUR_USERNAME/YOUR_REPO/resolve/main/best.pt"
+      - key: HF_TOKEN
+        sync: false  # set this manually in Render dashboard (if repo is private)
+      - key: CORS_ALLOW_ORIGINS
+        value: "https://your-vercel-app.vercel.app"
